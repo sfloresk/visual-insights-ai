@@ -1,0 +1,397 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Visual Insights AI
+
+  Sample SAM Template for Visual Insights AI
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Environment:
+      Variables:
+        PYTHONHASHSEED: 12345 #TODO: Making this a secret will improve security posture
+
+Resources:
+  VisualInsightsAIWebClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref VisualInsightsAIUserPool
+      ClientName: VisualInsightsAIWebClient
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+        
+  VisualInsightsAIUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: VisualInsightsAIUserPool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+      Schema:
+        - AttributeDataType: String
+          Name: email
+          Required: false
+
+  VisualInsightsAIAPI:
+      Type: AWS::Serverless::Api
+      Properties:
+        StageName: dev
+        Cors:
+          AllowMethods: "'POST'"
+          AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+          AllowOrigin: "'*'"
+        Auth:
+          Authorizers:
+            CognitoAuthorizer:
+              UserPoolArn: !GetAtt "VisualInsightsAIUserPool.Arn"
+
+  GetImageDataFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      Environment: 
+          Variables:
+            DYNAMODB_RESULTS_TABLE_NAME: !Ref ResultsTable
+            S3_BUCKET_NAME: !Ref ResultsBucket
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      CodeUri: ./getImageData/
+      Architectures:
+        - x86_64
+      Events:
+        DetectItem:
+          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /images/read
+            Method: POST
+            RestApiId: !Ref VisualInsightsAIAPI
+            Auth:
+              Authorizer: CognitoAuthorizer
+      Policies:
+        Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              - dynamodb:UpdateItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:Scan
+              - dynamodb:Query
+            Resource:
+              - !GetAtt "ResultsTable.Arn"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:PutObject
+              - s3:GetObject
+            Resource:
+              - !GetAtt "ResultsBucket.Arn"
+              - Fn::Join:
+                  - ""
+                  - - !GetAtt "ResultsBucket.Arn"
+                    - "/*"
+
+  ListImageFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      Environment: 
+        Variables:
+          DYNAMODB_RESULTS_TABLE_NAME: !Ref ResultsTable
+          S3_BUCKET_NAME: !Ref ResultsBucket
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      CodeUri: ./listImageData/
+      Architectures:
+        - x86_64
+      Events:
+        DetectItem:
+          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /images/result
+            Method: GET
+            RestApiId: !Ref VisualInsightsAIAPI
+            Auth:
+              Authorizer: CognitoAuthorizer
+      Policies:
+        Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:Scan
+              - dynamodb:Query
+            Resource:
+              - !GetAtt "ResultsTable.Arn"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetObject
+            Resource:
+              - !GetAtt "ResultsBucket.Arn"
+              - Fn::Join:
+                  - ""
+                  - - !GetAtt "ResultsBucket.Arn"
+                    - "/*"
+
+
+
+  ProcessDynamoDBUpdatesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Environment: 
+          Variables:
+            SNS_TOPIC: !Ref VisualInsightsTopic
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      CodeUri: ./ProcessDynamoDBUpdates/
+      Architectures:
+        - x86_64
+      Events:
+        Stream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt ResultsTable.StreamArn
+            BatchSize: 100
+            StartingPosition: TRIM_HORIZON
+      Policies:
+        Statement:
+          - Effect: "Allow"
+            Action: 
+              - "dynamodb:DescribeStream"
+              - "dynamodb:GetRecords"
+              - "dynamodb:GetShardIterator"
+              - "dynamodb:ListStreams"
+            Resource: 
+              - !GetAtt "ResultsTable.Arn"
+          - Effect: "Allow"
+            Action: 
+              - "sns:publish"
+            Resource: !Ref VisualInsightsTopic
+
+  ResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      AttributeDefinitions: 
+        - AttributeName: userEmail
+          AttributeType: S
+        - AttributeName: fileName
+          AttributeType: S
+      KeySchema: 
+        - AttributeName: userEmail
+          KeyType: HASH
+        - AttributeName: fileName
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+        
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 
+        Fn::Join:
+          - '-'
+          - - visual-insights-ai
+            - Fn::Select:
+                - 4
+                - Fn::Split:
+                    - '-'
+                    - Fn::Select:
+                        - 2
+                        - Fn::Split:
+                            - /
+                            - Ref: AWS::StackId
+
+  AnalyticsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: AnalyticsQueue
+
+  AdsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: AdsQueue
+
+  # Policy allows SNS to publish to this SQS queue
+  SnsToAnalyticsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Allow SNS publish to SQS"
+            Effect: Allow
+            Principal: 
+              Service: "sns.amazonaws.com"
+            Resource: 
+              - !GetAtt AnalyticsQueue.Arn
+            Action: SQS:SendMessage
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref VisualInsightsTopic
+      Queues:
+        - Ref: AnalyticsQueue
+  
+  SnsToAdsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Allow SNS publish to SQS"
+            Effect: Allow
+            Principal: 
+              Service: "sns.amazonaws.com"
+            Resource: 
+              - !GetAtt AdsQueue.Arn
+            Action: SQS:SendMessage
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref VisualInsightsTopic
+      Queues:
+        - Ref: AdsQueue
+
+  VisualInsightsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+        Subscription:
+          - Endpoint:
+              Fn::GetAtt:
+                - "AnalyticsQueue"
+                - "Arn"
+            Protocol: "sqs"
+          - Endpoint:
+              Fn::GetAtt:
+                - "AdsQueue"
+                - "Arn"
+            Protocol: "sqs"
+        TopicName: "VisualInsightsTopic"
+
+  CreateAdsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      CodeUri: ./createAds/
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          ADS_TABLE_NAME: !Ref AdsTable
+      Events:
+        AdsQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt AdsQueue.Arn
+            BatchSize: 10
+      Policies:
+        Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              - dynamodb:UpdateItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:Scan
+              - dynamodb:Query
+            Resource:
+              - !GetAtt "AdsTable.Arn"
+  
+  AdsTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      AttributeDefinitions: 
+        - AttributeName: userEmail
+          AttributeType: S
+        - AttributeName: adId
+          AttributeType: S
+      KeySchema: 
+        - AttributeName: userEmail
+          KeyType: HASH
+        - AttributeName: adId
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  CreateAnalyticsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      CodeUri: ./createAnalytics/
+      Environment:
+        Variables:
+          ANALYTICS_TABLE_NAME: !Ref AnalyticsTable
+      Architectures:
+        - x86_64
+      Events:
+        AnalyticsQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt AnalyticsQueue.Arn
+            BatchSize: 10
+      Policies:
+        Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              - dynamodb:UpdateItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:Scan
+              - dynamodb:Query
+            Resource:
+              - !GetAtt "AnalyticsTable.Arn"
+
+  AnalyticsTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      AttributeDefinitions: 
+        - AttributeName: userEmail
+          AttributeType: S
+        - AttributeName: analyticsId
+          AttributeType: S
+      KeySchema: 
+        - AttributeName: userEmail
+          KeyType: HASH
+        - AttributeName: analyticsId
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+    
+
+Outputs:
+  VisualInsightsAIAPI:
+    Description: "API invoke URL"
+    Value: !Sub "https://${VisualInsightsAIAPI}.execute-api.${AWS::Region}.amazonaws.com/"
+  S3Bucket:
+    Description: "Results S3 bucket"
+    Value: !Sub "${ResultsBucket}"
