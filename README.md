@@ -15,7 +15,7 @@ This code provides an example of how to create an end-to-end solution to inferen
 10. SQS - Queue updates to be processed by additional integrations
 
 
-[Solution Architecture](./docs/solution_architecture.png)
+![Solution Architecture](./docs/solution_architecture.png)
 
 Most of the deployment of the infrastructure is automated using the Serverless Application Model. For detail instructions, follows the steps [here](./infrastructure/README.md)
 
