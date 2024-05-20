@@ -6,7 +6,7 @@ This project contains source code and supporting files for a serverless applicat
 
 Follow the steps in [this guide](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) to enable access of the model "Anthropic Claude 3 Sonnet" in us-east-1. The access status of "Anthropic Claude 3 Sonnet" should be equals to "Access granted"
 
-## Deploy API Gateway, Lambda function and Cognito user pool
+## Deploy infrastructure with SAM
 
 The application uses several AWS resources, including a Lambda function, a Cognito user pool and an API Gateway. These resources are defined in the `template.yaml` file in this project. You can update the template to add AWS resources through the same deployment process that updates your application code.
 
